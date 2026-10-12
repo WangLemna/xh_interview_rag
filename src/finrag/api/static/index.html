@@ -1,0 +1,589 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FinRAG · A 股年报问答</title>
+<style>
+  /* ── 配色：深色（引用面板要长时间盯数字，浅色底反光更累） ── */
+  :root{
+    --bg:#0e1116; --panel:#151922; --panel-2:#1b2130; --line:#242c3a;
+    --fg:#e7ebf3; --fg-dim:#93a0b5; --fg-faint:#5f6b80;
+    --accent:#5b8cff; --ok:#4fbf8b; --warn:#e0a458; --bad:#e5646d;
+    --radius:10px; --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,"Courier New",monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{height:100%}
+  body{
+    margin:0;background:var(--bg);color:var(--fg);
+    font:15px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    display:flex;flex-direction:column;
+  }
+
+  /* ── 顶栏 ── */
+  header{
+    display:flex;align-items:center;gap:14px;padding:12px 20px;
+    border-bottom:1px solid var(--line);background:var(--panel);flex:0 0 auto;
+  }
+  header h1{margin:0;font-size:16px;font-weight:600;letter-spacing:.3px}
+  header h1 span{color:var(--fg-faint);font-weight:400;margin-left:8px;font-size:13px}
+  .grow{flex:1}
+  .badge{
+    font:12px/1 var(--mono);padding:5px 9px;border-radius:999px;
+    border:1px solid var(--line);color:var(--fg-dim);white-space:nowrap;
+  }
+  .badge.ok{color:var(--ok);border-color:#2a4c3d}
+  .badge.bad{color:var(--bad);border-color:#5a2c30}
+
+  /* ── 主体两栏 ── */
+  main{flex:1;display:grid;grid-template-columns:minmax(0,1.55fr) minmax(320px,.95fr);min-height:0}
+  @media (max-width:980px){ main{grid-template-columns:1fr;grid-template-rows:1fr auto} }
+
+  .chat{display:flex;flex-direction:column;min-height:0;border-right:1px solid var(--line)}
+  .stream{flex:1;overflow-y:auto;padding:22px 24px}
+  .sources{border-left:1px solid var(--line);background:var(--panel);overflow-y:auto;padding:18px 18px 26px}
+  @media (max-width:980px){ .chat{border-right:none} .sources{border-left:none;border-top:1px solid var(--line)} }
+
+  /* ── 对话 ── */
+  .q{margin:0 0 18px;padding:12px 15px;border-radius:var(--radius);
+     background:var(--panel-2);border:1px solid var(--line);white-space:pre-wrap}
+  .q::before{content:"问";display:block;font:11px/1 var(--mono);color:var(--accent);
+             letter-spacing:1px;margin-bottom:7px}
+  .a{white-space:pre-wrap;margin:0 0 8px;word-break:break-word}
+  .a.refusal{color:var(--warn)}
+  .a .cite{
+    font:11px/1 var(--mono);color:var(--accent);background:#1b2740;
+    border:1px solid #2c4272;border-radius:5px;padding:2px 5px;margin:0 2px;
+    cursor:pointer;vertical-align:1px;
+  }
+  .a .cite:hover{background:#243457}
+  .cursor{display:inline-block;width:7px;height:15px;background:var(--accent);
+          vertical-align:-2px;animation:bl .9s steps(1) infinite}
+  @keyframes bl{50%{opacity:0}}
+
+  /* ── 思考过程（reasoning_content，与答案分两条流）── */
+  .think{border:1px solid var(--line);background:#0b0e13;border-radius:var(--radius);
+         margin:0 0 12px;overflow:hidden}
+  .think .th{display:flex;align-items:center;gap:8px;padding:8px 11px;cursor:pointer;
+             font:12px/1 var(--mono);color:var(--fg-faint);user-select:none}
+  .think .th::before{content:"▸";font-size:10px}
+  .think.open .th::before{content:"▾"}
+  .think .th b{font-weight:500;color:var(--fg-dim)}
+  .think .th .grow{flex:1}
+  .think .bd{display:none;padding:10px 12px;border-top:1px dashed var(--line);
+             font:12.5px/1.62 var(--mono);color:var(--fg-faint);
+             white-space:pre-wrap;word-break:break-word;max-height:300px;overflow-y:auto}
+  .think.open .bd{display:block}
+  .think .dot{width:6px;height:6px;border-radius:50%;background:var(--accent);
+              flex:0 0 auto;animation:bl .9s steps(1) infinite}
+  .think.done .dot{animation:none;background:var(--fg-faint)}
+
+  .row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:10px 0 0;
+       font:12px/1.5 var(--mono);color:var(--fg-faint)}
+  .row b{color:var(--fg-dim);font-weight:500}
+
+  /* ── 状态块 ── */
+  .note{margin:10px 0 0;padding:10px 13px;border-radius:var(--radius);
+        border:1px solid var(--line);background:var(--panel-2);font-size:13.5px}
+  .note.warn{border-color:#5c4526;background:#241d12;color:#f0cf9c}
+  .note.bad{border-color:#5a2c30;background:#241417;color:#f0a8ae}
+  .note.ok{border-color:#2a4c3d;background:#132018;color:#a9e0c6}
+  .note h4{margin:0 0 5px;font-size:12px;letter-spacing:.6px;text-transform:uppercase;
+           color:var(--fg-faint);font-weight:600}
+  .note code{font:12px var(--mono);background:#0006;padding:1px 5px;border-radius:4px}
+
+  /* ── 输入区 ── */
+  .composer{flex:0 0 auto;border-top:1px solid var(--line);background:var(--panel);padding:14px 16px}
+  .ctl{display:flex;gap:8px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
+  .seg{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+  .seg button{
+    background:transparent;border:0;color:var(--fg-dim);font:12px var(--mono);
+    padding:6px 11px;cursor:pointer;
+  }
+  .seg button[aria-pressed="true"]{background:var(--accent);color:#08101f;font-weight:600}
+  label.chk{display:flex;align-items:center;gap:6px;font:12px var(--mono);color:var(--fg-dim);cursor:pointer}
+  textarea{
+    width:100%;min-height:56px;max-height:180px;resize:vertical;
+    background:var(--panel-2);border:1px solid var(--line);border-radius:var(--radius);
+    color:var(--fg);padding:11px 13px;font:15px/1.5 inherit;outline:none;
+  }
+  textarea:focus{border-color:var(--accent)}
+  .send{display:flex;gap:10px;align-items:center;margin-top:9px}
+  button.go{
+    background:var(--accent);color:#08101f;border:0;border-radius:8px;
+    padding:9px 20px;font-size:14px;font-weight:600;cursor:pointer;
+  }
+  button.go:disabled{opacity:.45;cursor:not-allowed}
+  button.ghost{
+    background:transparent;border:1px solid var(--line);color:var(--fg-dim);
+    border-radius:8px;padding:9px 14px;font-size:13px;cursor:pointer;
+  }
+  .hint{font:12px var(--mono);color:var(--fg-faint)}
+
+  /* ── 引用卡片 ── */
+  .sources h3{margin:0 0 4px;font-size:13px;letter-spacing:.4px}
+  .sources .sub{font:12px/1.5 var(--mono);color:var(--fg-faint);margin:0 0 14px}
+  .src{border:1px solid var(--line);border-radius:var(--radius);background:var(--panel-2);
+       margin-bottom:10px;overflow:hidden}
+  .src.hot{border-color:var(--accent)}
+  .src .hd{display:flex;gap:9px;align-items:baseline;padding:9px 11px;cursor:pointer}
+  .src .no{font:11px var(--mono);color:var(--accent);border:1px solid #2c4272;
+           border-radius:5px;padding:1px 5px;flex:0 0 auto}
+  .src .lb{flex:1;font-size:12.5px;color:var(--fg-dim);word-break:break-word}
+  .src .sc{font:11px var(--mono);color:var(--fg-faint);white-space:nowrap}
+  .src .bd{padding:0 11px 11px;font:12.5px/1.6 var(--mono);color:var(--fg-dim);
+           white-space:pre-wrap;border-top:1px dashed var(--line);padding-top:9px;display:none}
+  .src.open .bd{display:block}
+  .empty{color:var(--fg-faint);font-size:13px}
+  .examples{display:flex;flex-direction:column;gap:6px;margin-top:12px}
+  .examples button{
+    text-align:left;background:var(--panel-2);border:1px solid var(--line);
+    color:var(--fg-dim);border-radius:8px;padding:8px 11px;font-size:13px;cursor:pointer;
+  }
+  .examples button:hover{border-color:var(--accent);color:var(--fg)}
+</style>
+</head>
+<body>
+<header>
+  <h1>FinRAG<span>A 股年报检索增强问答</span></h1>
+  <div class="grow"></div>
+  <div class="badge" id="hb">检查服务中…</div>
+  <div class="badge" id="hb-model">—</div>
+</header>
+
+<main>
+  <section class="chat">
+    <div class="stream" id="stream">
+      <p class="empty">
+        问一条 <b>well-formed</b> 的问题：带上公司名（或 <code>六位代码</code>）与年份，
+        例如「美的集团2024年营业总收入是多少」。<br>
+        问句里有公司名时，系统会先把它解析成 doc_ids 再检索 —— 这是线上真实形态（auto 口径）。
+      </p>
+      <div class="examples" id="examples"></div>
+    </div>
+    <div class="composer">
+      <div class="ctl">
+        <div class="seg" id="seg">
+          <button data-mode="auto" aria-pressed="true" title="从问句认公司名/年份，限定到对应文档（线上形态）">auto 口径</button>
+          <button data-mode="closed" aria-pressed="false" title="全库不过滤，含专名消歧的难度">closed 口径</button>
+        </div>
+        <label class="chk"><input type="checkbox" id="bt"> 注入整节父块</label>
+        <label class="chk" title="只影响是否展示思维链；模型的思考模式始终开着，答案质量不受影响">
+          <input type="checkbox" id="think" checked> 显示思考过程</label>
+        <div class="grow"></div>
+        <span class="hint" id="count-hint"></span>
+      </div>
+      <textarea id="q" placeholder="例：格力电器2025年员工的人均薪酬是多少（这条库里没有，测的是拒答）"></textarea>
+      <div class="send">
+        <button class="go" id="go">提问</button>
+        <button class="ghost" id="stop" disabled>停止</button>
+        <button class="ghost" id="clear" disabled title="清空多轮上下文，下一次提问不再延续上文">清空上下文</button>
+        <span class="hint" id="mem-hint">无上下文</span>
+        <span class="hint" id="tip">Enter 发送 · Shift+Enter 换行</span>
+      </div>
+    </div>
+  </section>
+
+  <aside class="sources" id="sources">
+    <h3>引用来源</h3>
+    <p class="sub">检索 → 融合 → 重排后进入 prompt 的片段。编号与答案里的 [n] 对应。</p>
+    <p class="empty">还没有提问。</p>
+  </aside>
+</main>
+
+<script>
+"use strict";
+
+/* 用 fetch + ReadableStream 解 SSE（不用 EventSource：它只支持 GET，会把查询塞进 URL）。
+   服务端每条事件以 "\n\n" 结尾，见 server._sse。 */
+
+const $ = (id) => document.getElementById(id);
+const streamEl = $("stream"), srcEl = $("sources");
+let MODE = "auto", running = false, ctrl = null;
+
+/* ── 多轮记忆（客户端持有）──
+   每轮存：用户原问句 + 该轮改写出的自足问句（standalone）+ 解析出的公司/年份/实体；
+   **不存模型答案** —— 见后端 gen/rewrite.py。**每一轮都存**（含拒答 / 被拦 / 失败）：
+   拒答只否决"答案"，不否决"用户问过什么"。一轮 = 一次用户提问，standalone 是本轮的字段、不算新的一轮。
+   这里只是**本地缓冲上限**（留多少）；回传多少、喂给模型多少由服务端决定：
+   服务端保留 multiturn.max_turns 轮，其中真正进改写 prompt 的只有最近 multiturn.rewrite_turns 轮。
+   所以本地可以放心留多。 */
+const MEM_BUFFER = 100;
+let HISTORY = [], MEM_SERVER = null;
+
+function syncMemHint(){
+  const el = $("mem-hint"); if (!el) return;
+  let t = HISTORY.length ? `上下文 ${HISTORY.length} 轮` : "无上下文";
+  // 服务端的实际读数（保留 kept / 喂给改写 for_rewrite）——"保留多、喂得少"看这两个数
+  if (MEM_SERVER) t += ` · 改写用 ${MEM_SERVER.for_rewrite}`;
+  el.textContent = t;
+  $("clear").disabled = HISTORY.length === 0;
+}
+
+/* ── 健康检查：把 Key / 库 / 模型分开报 ── */
+async function health(){
+  const hb = $("hb"), hm = $("hb-model");
+  try{
+    const r = await fetch("/api/health");
+    const d = await r.json();
+    hm.textContent = d.model + (d.has_key ? "" : " · 无 Key");
+    if (d.ok){
+      hb.className = "badge ok";
+      hb.textContent = `就绪 · ${d.n_documents} 份年报 / ${d.n_child_chunks} 片`;
+      $("count-hint").textContent = `rerank=${d.rerank_enabled} · final_top_k=${d.final_top_k}`;
+    } else {
+      hb.className = "badge bad";
+      hb.textContent = "数据库不可用";
+      streamEl.insertAdjacentHTML("beforeend",
+        `<div class="note bad"><h4>数据库不可用</h4><code>${esc(d.db_error||"")}</code>
+         <div style="margin-top:6px">先跑 <code>scripts/check_env.py</code>。</div></div>`);
+    }
+  }catch(e){
+    hb.className = "badge bad"; hb.textContent = "服务未响应";
+  }
+}
+
+/* ── 示例问题：用库里的 meta.company 拼（即 resolve 别名表的键），不硬编码、不从 title 截 ── */
+async function examples(){
+  try{
+    const d = await (await fetch("/api/corpus")).json();
+    const docs = d.documents || [];
+    if (!docs.length) return;
+    const pick = (code) => docs.find(x => x.code === code);
+    const m = pick("000333"), g = pick("000651"), b = pick("002594");
+    const qs = [
+      m && `${m.company}${m.year}年营业总收入是多少`,
+      m && `${m.company}${m.year}年研发投入合计是多少`,
+      g && `${g.company}${g.year}年员工的人均薪酬是多少`,   // 负样本：库里没有，测拒答
+      b && `${b.company}${b.year}年货币资金是多少`,
+    ].filter(Boolean);
+    $("examples").innerHTML = qs.map(q => `<button>${esc(q)}</button>`).join("");
+    $("examples").querySelectorAll("button").forEach(b =>
+      b.onclick = () => { $("q").value = b.textContent; $("q").focus(); });
+  }catch(_){}
+}
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g,
+  c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+/* ── 把答案里的 [n] 变成可点的引用片 ──
+   先 esc 再插标签，否则模型输出里的 < > 会被当成 HTML 执行。 */
+function renderAnswer(text){
+  return esc(text).replace(/\[(\d+)\]/g,
+    (_, n) => `<span class="cite" data-n="${n}">[${n}]</span>`);
+}
+function bindCites(root){
+  root.querySelectorAll(".cite").forEach(el => el.onclick = () => {
+    const card = document.querySelector(`.src[data-n="${el.dataset.n}"]`);
+    if (!card) return;
+    document.querySelectorAll(".src.hot").forEach(x => x.classList.remove("hot"));
+    card.classList.add("hot", "open");
+    card.scrollIntoView({behavior:"smooth", block:"center"});
+  });
+}
+
+/* ── 引用面板 ── */
+function renderSources(meta){
+  const cs = meta.citations || [];
+  if (!cs.length){
+    srcEl.innerHTML = `<h3>引用来源</h3><p class="sub">没有片段进入 prompt —— ${
+      meta.blocked ? "范围被拦住了" : "召回为空"}。</p>`;
+    return;
+  }
+  const rr = meta.rerank || {};
+  const rc = meta.recall || {};
+  const rt = rc.routes || {};
+  // 路线级检测：两路射程内的"共同 / 各自独占"命中 —— 直接看稀疏路有没有真贡献（sparse_only）
+  const routeLine = `召回：稠密 ${rt.dense ?? rc.n_dense ?? 0} · 稀疏 ${rt.sparse ?? rc.n_sparse ?? 0}`
+    + `（共同 ${rt.both ?? 0} · 稠密独有 ${rt.dense_only ?? 0} · 稀疏独有 ${rt.sparse_only ?? 0}）`
+    + (rc.skipped && Object.keys(rc.skipped).length
+        ? ` · 跳过 ${esc(Object.keys(rc.skipped).join("/"))}` : "");
+  // 逐路耗时（C0/E4）：编码 / 建 ef_search / 稠密 / 稀疏 / 融合 —— 判断"哪一路是瓶颈、稀疏路要不要上索引"
+  const TL = {encode:"编码", set_ef_search:"ef", dense:"稠密", sparse:"稀疏", fuse:"融合"};
+  const tmLine = Object.entries(rc.timings_ms || {})
+    .filter(([, v]) => Number(v) > 0)
+    .map(([k, v]) => `${TL[k] || k} ${Number(v).toFixed(0)}`).join(" · ");
+  srcEl.innerHTML = `<h3>引用来源</h3>
+    <p class="sub">${rr.n_candidates} 个候选 → 重排（${rr.scored ? esc(rr.model) : "未跑模型"}
+     · ${esc(rr.device)} · ${rr.elapsed_ms}ms）→ 取 ${rr.top_k} 条${
+       rr.grouped ? "（已按组保底：公司多实体）" : ""}。点卡片展开原文。</p>
+    <p class="sub">${routeLine}</p>
+    ${tmLine ? `<p class="sub">检索耗时(ms)：${tmLine}</p>` : ""}`
+    + cs.map(c => {
+      const r = c.routes || {};
+      // 每条的路线溯源 + 融合池位次：看得出"靠哪一路召回的、重排前排在池里第几"
+      const prov = [
+        r.dense_rank ? `稠密 #${r.dense_rank}` : "",
+        r.sparse_rank ? `稀疏 #${r.sparse_rank}` : "",
+      ].filter(Boolean).join("·") || "—";
+      const pool = c.rrf_rank != null ? `池 #${c.rrf_rank}` : "";
+      return `
+      <div class="src" data-n="${c.index}">
+        <div class="hd">
+          <span class="no">[${c.index}]</span>
+          <span class="lb">${esc(c.label)}</span>
+          <span class="sc">${c.score == null ? "—" : Number(c.score).toFixed(3)}
+            ${pool ? "· " + pool : ""} · ${prov}
+            ${c.token_count ? "· " + c.token_count + "tok" : ""}</span>
+        </div>
+        <div class="bd">${esc(c.preview || "")}${(c.preview || "").length >= 220 ? " …" : ""}</div>
+      </div>`;
+    }).join("");
+  srcEl.querySelectorAll(".src .hd").forEach(h =>
+    h.onclick = () => h.parentElement.classList.toggle("open"));
+}
+
+/* ── SSE 解析 ── */
+function parseBlock(raw){
+  let ev = "message", data = "";
+  for (const line of raw.split("\n")){
+    if (line.startsWith("event:")) ev = line.slice(6).trim();
+    else if (line.startsWith("data:")) data += line.slice(5).trim();
+  }
+  try { return {ev, data: JSON.parse(data)}; } catch(_) { return {ev, data: null}; }
+}
+
+async function ask(){
+  if (running) return;
+  const query = $("q").value.trim();
+  if (!query) { $("q").focus(); return; }
+
+  const showThink = $("think").checked;
+  const body = {
+    query, mode: MODE, backtrack: $("bt").checked, show_reasoning: showThink,
+    // 全量回传本地缓冲；**服务端**再按 multiturn.max_turns 保留、按 rewrite_turns 决定喂多少。
+    // 每项只含用户问句 + 该轮自足问句 + 解析出的公司/年份/实体，不含答案。
+    history: HISTORY,
+  };
+
+  // 发送即清空输入框，避免看到"已发出还在框里"的错觉。
+  $("q").value = "";
+
+  // 首问：把欢迎区与示例清掉，之后一直往下追加。
+  if (streamEl.querySelector(".empty")){
+    streamEl.querySelectorAll(".empty,#examples").forEach(e => e.remove());
+  }
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `<div class="q">${esc(query)}</div>`
+    + (showThink ? `<div class="think open">
+         <div class="th"><span class="dot"></span><b>思考中…</b>
+           <span class="grow"></span><span class="meta"></span></div>
+         <div class="bd"></div>
+       </div>` : "")
+    + `<div class="a"><span class="cursor"></span></div>
+       <div class="row"></div>`;
+  streamEl.appendChild(wrap);
+  const ansEl = wrap.querySelector(".a"), rowEl = wrap.querySelector(".row");
+
+  /* 思考面板：思维链只往 .bd 里 textContent 追加（不解析 HTML），
+     reasoning 事件可能几千条，这里不做任何重排，只滚到底。 */
+  const thinkEl = wrap.querySelector(".think");
+  const thinkBd = thinkEl && thinkEl.querySelector(".bd");
+  const thinkLb = thinkEl && thinkEl.querySelector("b");
+  const thinkMeta = thinkEl && thinkEl.querySelector(".meta");
+  if (thinkEl) thinkEl.querySelector(".th").onclick = () => thinkEl.classList.toggle("open");
+  let thinkText = "", thinkT0 = 0, thinkMs = null;
+
+  const thinkMetaText = () => [
+    thinkMs === null ? null : `${(thinkMs/1000).toFixed(1)}s`,
+    thinkText ? `${thinkText.length} 字` : null,
+  ].filter(Boolean).join(" · ");
+
+  /* 收尾：一个字都没收到就整块移除，否则记下耗时并收起，把答案让回视野（点标题再展开）。
+     幂等 —— done 事件与 finally 都会调它。 */
+  function closeThink(){
+    if (!thinkEl || thinkEl.dataset.closed) return;
+    thinkEl.dataset.closed = "1";
+    if (!thinkText.trim()){ thinkEl.remove(); return; }
+    thinkEl.classList.add("done");
+    thinkEl.classList.remove("open");
+    thinkLb.textContent = "思考过程";
+    thinkMeta.textContent = thinkMetaText();
+  }
+
+  streamEl.scrollTop = streamEl.scrollHeight;
+
+  running = true; $("go").disabled = true; $("stop").disabled = false;
+  ctrl = new AbortController();
+  let text = "", turnScope = null, turnRewrite = null, recorded = false;
+
+  /* 记入多轮上下文：**每一轮都记**（含拒答 / 被拦 / 失败）—— 拒答只否决"答案"，
+     不否决"用户问过什么"。只记**用户问句**与解析出的实体，**不记答案**。
+     一轮 = 一次用户提问；`standalone`（该轮改写出的自足问句）是本轮的**一个字段**，
+     不单独算一轮。记在 finally 里，保证任何收尾路径都只记一次。 */
+  function recordTurn(){
+    if (recorded) return;
+    recorded = true;
+    const s = turnScope || {}, rw = turnRewrite || {};
+    // 自足问句：改写成功才有，失败时为空（回落原问）。下次改写优先用它，避免指代层层回叠。
+    const standalone = String(rw.standalone || query || "").slice(0, 500);
+    // 本轮提到的公司名（含库外）：优先用改写层抽出的，否则回落到范围解析的结果
+    const ents = ((rw.entities && rw.entities.length) ? rw.entities
+                  : [...(s.companies || []), ...(s.missing || [])]).slice(0, 20);
+    HISTORY.push({
+      query,
+      standalone,
+      company: s.company || null,
+      year: s.year || null,
+      entities: ents,
+    });
+    if (HISTORY.length > MEM_BUFFER) HISTORY = HISTORY.slice(-MEM_BUFFER);
+    syncMemHint();
+  }
+
+  try{
+    const resp = await fetch("/api/chat", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify(body), signal: ctrl.signal,
+    });
+    if (!resp.ok || !resp.body) throw new Error(`HTTP ${resp.status}`);
+
+    const reader = resp.body.getReader(), dec = new TextDecoder();
+    let buf = "";
+    for(;;){
+      const {done, value} = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, {stream:true});
+      let i;
+      while ((i = buf.indexOf("\n\n")) >= 0){
+        const blk = buf.slice(0, i); buf = buf.slice(i + 2);
+        const {ev, data} = parseBlock(blk);
+        if (!data) continue;
+
+        if (ev === "meta"){
+          renderSources(data);
+          // 服务端回报的多轮窗口读数（保留 kept / 真正喂给改写 for_rewrite）
+          MEM_SERVER = data.history || null;
+          const s = data.scope || {}, rc = data.recall || {}, rw = data.rewrite || {};
+          turnScope = s; turnRewrite = rw;
+          const bits = [];
+          // 多实体：companies 可能有多家（对比类问句）；老字段 company 作兜底
+          const comps = (s.companies && s.companies.length) ? s.companies : (s.company ? [s.company] : []);
+          if (comps.length) bits.push(`<b>公司</b> ${esc(comps.join(" + "))}`);
+          if (s.year) bits.push(`<b>年份</b> ${s.year}`);
+          if (s.inherited) bits.push(`<span style="color:var(--accent)">↩ 沿用上一轮</span>`);
+          if (s.n_doc_ids) bits.push(`<b>限定</b> ${s.n_doc_ids} 份`);
+          // 提到了但覆盖不到的公司（库外 / 无对应年份）—— 必须让人看见，不能被静默丢掉
+          if (s.missing && s.missing.length)
+            bits.push(`<span style="color:var(--warn)">库内无 ${esc(s.missing.join("、"))}</span>`);
+          // 只有确实改写了才展示，避免"改写==原文"时噪声占位
+          if (rw.used && rw.standalone) bits.push(`<b>改写</b> ${esc(rw.standalone)}`);
+          // 模型自报的"依据轮号"（观测值）—— 让"它到底参考了哪一轮"可见
+          if (rw.used_turns && rw.used_turns.length)
+            bits.push(`<b>依据</b> 第${rw.used_turns.join("、")}轮`);
+          // 多实体走的是"按组召回 + 按组保底"，top-k 不是全局前 k，必须让人看见
+          if (data.rerank && data.rerank.grouped)
+            bits.push(`<span style="color:var(--accent)">已按组配平</span>`);
+          bits.push(`<b>召回</b> ${rc.used_routes.join("+")} ${rc.n_dense}/${rc.n_sparse}`);
+          const t = data.timings_ms || {};
+          // 检索侧延迟分解：改写（LLM 往返）· 检索+重排 · 组装 prompt
+          bits.push(`<b>耗时</b> 改写 ${(t.rewrite||0).toFixed(0)} · 检索 ${(t.retrieve_rerank||0).toFixed(0)} · 组装 ${(t.build_prompt||0).toFixed(0)}ms`);
+          rowEl.innerHTML = bits.join(" · ");
+        } else if (ev === "reasoning"){
+          // 开关关着时后端不会发这个事件；收到就说明面板在。
+          if (!thinkBd) continue;
+          if (!thinkT0) thinkT0 = performance.now();
+          thinkText += data.text || "";
+          thinkBd.textContent = thinkText;
+          thinkBd.scrollTop = thinkBd.scrollHeight;
+          if (thinkMs === null) thinkMeta.textContent = thinkMetaText();
+        } else if (ev === "delta"){
+          // 首个答案帧 = 思考阶段结束，就地结算思考耗时。
+          if (thinkEl && thinkT0 && thinkMs === null){
+            thinkMs = performance.now() - thinkT0;
+            thinkMeta.textContent = thinkMetaText();
+          }
+          text += data.text || "";
+          ansEl.innerHTML = renderAnswer(text) + `<span class="cursor"></span>`;
+          bindCites(ansEl);
+          streamEl.scrollTop = streamEl.scrollHeight;
+        } else if (ev === "audit"){
+          const nM = (data.matched||[]).length, nG = (data.glued||[]).length;
+          rowEl.insertAdjacentHTML("beforeend",
+            ` · <b>数字</b> ${nM} 匹配 / ${nG} 粘连 / ${(data.unsupported||[]).length} 未支持`);
+          if ((data.unsupported || []).length){
+            ansEl.insertAdjacentHTML("afterend",
+              `<div class="note warn"><h4>数字溯源提示</h4>
+               这些数字在注入的片段里**三档都找不到**：<code>${
+                 esc(data.unsupported.slice(0,10).join(", "))}</code><br>
+               ⚠ 这**不等于幻觉**，两个已知的合法来源会落进这里：
+               ① 单位换算（原文 <code>456,451,731 千元</code> → <code>45.6 亿元</code>）；
+               ② 中文数字（原文写 <code>120000</code>、答案写"十二万"）。
+               它只把可疑项挑出来给人看，**不参与拒答判断**。</div>`);
+          }
+          if (nG){
+            ansEl.insertAdjacentHTML("afterend",
+              `<div class="note ok"><h4>已归位：被相邻单元格粘住的数字</h4>
+               <code>${esc((data.glued||[]).slice(0,8).join(", "))}</code><br>
+               这些数**逐字就在原文里**，只是原文把相邻单元格无分隔地拼在了一起
+               （如 <code>…476.0014,951,202,185.14</code>），所以数字抽取器看不见它们。
+               已单独归入"粘连"档，<b>不计入可疑</b>。</div>`);
+          }
+        } else if (ev === "done"){
+          closeThink();
+          ansEl.innerHTML = renderAnswer(text);
+          ansEl.classList.toggle("refusal", !!data.refusal);
+          if (data.refusal){
+            rowEl.insertAdjacentHTML("beforeend",
+              ` · <span style="color:var(--warn)">已拒答</span>`);
+          }
+          if (data.elapsed_ms) {
+            rowEl.insertAdjacentHTML("beforeend",
+              ` · <b>生成</b> ${(data.elapsed_ms/1000).toFixed(1)}s`);
+          }
+          if (data.finish_reason === "length"){
+            rowEl.insertAdjacentHTML("beforeend",
+              ` · <span style="color:var(--warn)">被 max_tokens 截断</span>`);
+          }
+          // 交由 finally 里的 recordTurn() 统一记录（成功 / 拒答 / 被拦 / 失败都记）。
+        } else if (ev === "error"){
+          ansEl.innerHTML = renderAnswer(text);
+          wrap.insertAdjacentHTML("beforeend",
+            `<div class="note bad"><h4>调用失败 · ${esc(data.kind)}</h4>
+             <code>${esc(data.message)}</code>
+             ${data.hint ? `<div style="margin-top:6px">→ ${esc(data.hint)}</div>` : ""}</div>`);
+        } else if (ev === "aborted"){
+          ansEl.innerHTML = renderAnswer(text);
+          wrap.insertAdjacentHTML("beforeend",
+            `<div class="note warn"><h4>流中断</h4>以上是已生成的部分（未完成）。</div>`);
+        }
+        streamEl.scrollTop = streamEl.scrollHeight;
+      }
+    }
+  }catch(e){
+    ansEl.innerHTML = renderAnswer(text);
+    if (e.name !== "AbortError"){
+      wrap.insertAdjacentHTML("beforeend",
+        `<div class="note bad"><h4>请求异常</h4><code>${esc(e.message)}</code></div>`);
+    } else {
+      wrap.insertAdjacentHTML("beforeend",
+        `<div class="note warn"><h4>已停止</h4>以上是已生成的部分。</div>`);
+    }
+  }finally{
+    closeThink();   // 中断/异常路径的兜底：面板不能停在"思考中…"
+    recordTurn();   // 无论成功 / 拒答 / 被拦 / 失败，都把这一轮的用户问句记入上下文
+    running = false; $("go").disabled = false; $("stop").disabled = true; ctrl = null;
+    streamEl.scrollTop = streamEl.scrollHeight;
+    $("q").focus();
+  }
+}
+
+/* ── 事件绑定 ── */
+$("go").onclick = ask;
+$("stop").onclick = () => { if (ctrl) ctrl.abort(); };
+$("clear").onclick = () => { HISTORY = []; MEM_SERVER = null; syncMemHint(); $("tip").textContent = "已清空上下文"; };
+$("q").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey){ e.preventDefault(); ask(); }
+});
+$("seg").querySelectorAll("button").forEach(b => b.onclick = () => {
+  MODE = b.dataset.mode;
+  $("seg").querySelectorAll("button").forEach(x =>
+    x.setAttribute("aria-pressed", String(x === b)));
+  $("tip").textContent = MODE === "auto"
+    ? "auto：从问句认公司名/年份后限定文档（线上形态）"
+    : "closed：全库不过滤，含专名消歧难度";
+});
+
+health(); examples(); $("q").focus(); syncMemHint();
+</script>
+</body>
+</html>
