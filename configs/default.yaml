@@ -1,0 +1,177 @@
+# ============================================================
+# FinRAG 检索链路参数
+# ============================================================
+
+parse:
+  # 正文区跨页重复块的强噪声线：出现超过一半页面且归一化长度 ≤ maxlen 时删除
+  repeat_strong_ratio: 0.5
+  repeat_strong_maxlen: 12
+
+  # --- 无 TOC 文档的版式兜底 ---
+  fallback_enabled: true
+  # 兜底路径的可信度门控：body_share 低于此值则不启用
+  min_body_share: 0.85
+
+  # --- 栏重排（默认关，收益低且易误判表格页）---
+  reorder_columns: false
+
+  # --- 表格结构化（默认开）---
+  # 开：通过守门的表折叠成一个块，text 为整表 markdown，保留行边界；关：表退回多个行块。
+  # 关闭只停结构化，不停 find_tables 检出与 kind 标注。
+  structure_tables: true
+
+chunk:
+  max_tokens: 512          # 单个 chunk 的 token 上限
+  min_tokens: 80           # 低于此值尝试与相邻块合并，避免碎片
+  # 相邻块重叠 token 数，防止语义被切断；仅在硬切路径上生效
+  overlap_tokens: 64
+  respect_headings: true   # 优先在标题层级边界切分
+  # 硬切时优先把切点吸附到句末标点；关掉则退回纯字符二分
+  split_on_sentence: true
+  # 父块的 token 预算上限；设 0 则完全不生成父块。
+  # 节内总量超预算时不再"不配父块"，而是按窗口拆成多个父块。
+  parent_max_tokens: 2048
+  # 超长节的窗口：每窗最多几片 / 相邻窗口重叠几片（重叠防边界片丢上下文）
+  parent_window_pieces: 4
+  parent_window_overlap: 1
+
+  # --- 结构化表格作为独立检索单元（默认开）---
+  # 开：表格块独占片；被切 ≥2 片的表另配一条表头片（role='child'，内容为表 markdown 首行）。
+  # 关闭为一并停用，退回表与同节块共片、且无表头片。
+  table_units: true
+
+  # 把表 markdown 首行（表头行）复制给被硬切出来的非首片，仅对结构化表格块生效。
+  # 只取 markdown 首行，不用 TableData.header（后者常抄数据行，补错列名更糟）。
+  repeat_header: true
+
+embed:
+  # 本地权重路径
+  dense_model: models/bge-m3
+  dim: 1024
+  # cpu / cuda；无 GPU 环境改为 cpu
+  device: cuda
+  # fp16 省显存提速，CPU 推理时忽略
+  use_fp16: true
+  batch_size: 16           # CPU 上建议降回 4~8，否则内存吃紧
+  # 编码最大长度；模型上限 8192，本项目 chunk 上限 512 token，取 1024 留余量
+  max_length: 1024
+  # 向量缓存目录（缓存根，命中可跳过重复编码）。
+  # bge_m3._cache_dir 会再拼一层 `embeddings/`，故最终落点是 data/cache/embeddings/vectors.sqlite。
+  cache_dir: data/cache
+
+retrieve:
+  dense_top_k: 100         # 稠密检索召回数
+  sparse_top_k: 100        # 稀疏检索召回数
+  # 是否启用稀疏检索路；关闭时不影响 sparse_top_k 的取值
+  use_sparse: true
+  rrf_k: 60                # RRF 平滑常数（论文经验值 60）
+  # 送入 Cross-Encoder 重排的候选数，也是重排前后两栏读数的共同分母；
+  # 上限受融合并集约束（dense_top_k + sparse_top_k = 200，此处只取 100）
+  rerank_candidates: 100
+  final_top_k: 15          # 最终注入 prompt 的片段数
+  min_rerank_score: 0.0    # 拒答线，0 表示不拒答
+
+  # --- 多实体（对比类问句）---
+  # 命中 2 家以上公司时按公司分组各召回一次，再按组保底选取，
+  # 保证"A 和 B 对比"里每一方都有片段进 prompt（否则片段多的一家会占满 top-k）。
+
+  # 每组是否各取满 rerank_candidates（而不是把 100 均分给各组）。
+  # 开：两家 → 200 条进重排（约 2× 耗时）、三家 → 300。默认开。
+  group_pool_full: true
+  # 用"满额池"的组数上限；超过则改回按组数均分（但仍分组，不退回并集）。
+  full_pool_max_groups: 4
+  # 多实体的最终条数 = min(top_k_cap, final_top_k × 组数)，每家按 final_top_k 条放大。
+  # 放大无独立开关。
+  # ⚠ 与 server.py 的 le=20 是两处独立的 20，改这里不会带动那边。
+  top_k_cap: 20
+
+  # --- HNSW 图遍历的候选池 ---
+  # 必须 ≥ dense_top_k；设 0 表示沿用 PG 默认（仅调试用）
+  ef_search: 200
+
+rerank:
+  enabled: true
+  # 本地权重优先，同 embed.dense_model
+  model: models/bge-reranker-v2-m3
+  # 与 embed 同设备
+  device: cuda
+  use_fp16: true
+  batch_size: 16
+  # query+片配对后的总长上限，底层从片尾截；须大于 embed.max_length
+  max_length: 1024
+
+# ============================================================================
+# 别名模糊匹配：
+# ============================================================================
+fuzzy:
+  # 总开关。关掉 = 纯精确子串。
+  enabled: true
+
+  # --- 拼音索引（缩小候选）---
+  pinyin_candidates: 50
+  # 候选短于该长度时不做距离比对。
+  min_len: 3
+
+  # --- 编辑距离（比对缩小后的候选）---
+  # 拼音串上允许的最大编辑距离。同音/近音错别字（"格力电器"→"格力申器"）距离 1。
+  max_pinyin_dist: 1
+  # 汉字串上允许的最大编辑距离。默认 0 = 不启用：
+  # 拼音相同但汉字差很多（"格力"/"格林"同段），说明是不同公司而不是错别字。
+  max_char_dist: 0
+  # 多个候选分数并列时：true=取拼音最短的，false=全丢。
+  # 默认全丢 —— 宁可漏匹配，也不猜成别家公司。
+  tie_break: false
+
+llm:
+  # 模型名随官方下线而变，须写当前有效的名字。
+  # 与 config.py 的默认值需一起改（yaml 优先级高于代码默认值）。
+  # Key 走环境变量（DEEPSEEKFLASH_KEY / FINRAG_LLM__API_KEY），不要在此写明文。
+  model: deepseek-flash
+  base_url: https://api.deepseek.com
+  temperature: 0.0         # 事实性问答，不做发散
+  max_tokens: 4096
+  timeout: 60
+  stream: true
+
+multiturn:
+  # 多轮记忆。上一轮答案正文永不进 prompt，只传结构化实体 + 用户问句。
+
+  # LLM 问句改写：把问句补全成自足问句；话题判定并入同一次调用，
+  # 与生成共用同一个 LLM，不引入第二个模型。关掉 = 多轮只做下面的范围继承。
+  enabled: true
+  # 确定性范围继承：本轮没认出公司时，沿用上一轮的公司/年份重新定位文档；
+  # 是改写关闭或失败时的兜底。关掉 = 认不出公司即退回全库。
+  inherit_scope: true
+  # 服务端"保留"的历史轮数上限（也是请求里 history 的接受上限）。
+  # 调大它本身不改变检索行为。
+  max_turns: 100
+  # 送进改写 prompt 的候选窗口（最近若干轮）。
+  # 0 = 不调改写（退化为纯确定性范围继承，同时失去库外公司识别）。
+  rewrite_turns: 10
+  # 改写产物字符上限，超长视为失败并回落原问句
+  max_chars: 200
+
+gen:
+  # 生成侧组装策略；拒答话术与 system 提示词在 gen/prompt.py 定义，不在此配置。
+
+  # 引用标签是否带 heading_path（章节路径），仅影响引用可读性
+  include_heading_path: true
+
+  # 答案的数字溯源审计，仅观测、不参与拒答
+  audit_numbers: true
+
+api:
+  host: 127.0.0.1
+  port: 8000
+
+paths:
+  # 相对路径一律按项目根解析，绝对路径原样使用。
+  # 也可用环境变量覆盖，如 FINRAG_PATHS__RAW_DIR=D:\corpus
+  raw_dir: data/raw        # 语料目录；ingest.py 的 --raw-dir 默认取这里
+  log_dir: logs            # 报告落盘目录（入库 / 自检 / Key 检查）
+  cache_dir: data/cache    # 中间产物缓存根
+  # 语料清单（CSV）：身份(doc_id)与元数据(code/company/year)的唯一来源。
+  # 必填 —— 入库时找不到即失败（fail-closed），不退回"按文件名猜"。
+  # 表头：doc_key,code,company,year,path[,category,title,aliases]；path 相对 raw_dir。
+  # 用 scripts/make_manifest.py 从 PDF 目录生成（会剥 ST/XD 标签并把原始名写进 aliases）。
+  manifest: data/corpus_manifest.csv

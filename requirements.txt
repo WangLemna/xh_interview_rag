@@ -1,0 +1,46 @@
+# ============================================================
+# FinRAG 依赖清单
+# 安装：
+#   python -m pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+# ============================================================
+
+# --- 服务层 ---
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+pydantic>=2.9.0
+pydantic-settings>=2.6.0
+python-dotenv>=1.0.1
+python-multipart>=0.0.9
+
+# --- 文档解析（仅 PDF：A 股年报） ---
+pymupdf>=1.24.0            # PDF 解析（含布局/表格）
+# markdown-it-py>=3.0.0    # 暂不启用：当前语料不含 md 文档
+
+# --- Embedding / Rerank（本地推理） ---
+FlagEmbedding>=1.3.0       # BGE-M3 官方库，支持 dense/sparse/colbert 三输出
+transformers>=4.44.0
+torch>=2.2.0               # 深度学习后端
+sentencepiece>=0.2.0
+numpy>=1.26.0
+
+# --- 向量存储 ---
+psycopg[binary]>=3.2.0     # psycopg3，pgvector 官方推荐的 Python 驱动
+psycopg-pool>=3.2.0        # 连接池（store/pool.py）；未装时自动回落到内置极简池
+pgvector>=0.3.0            # 类型适配（vector / sparsevec 注册）
+
+# --- LLM 客户端 ---
+openai>=1.54.0             # DeepSeek 兼容 OpenAI 协议，直接复用
+
+# --- 通用工具 ---
+httpx>=0.27.0
+pyyaml>=6.0.1
+tqdm>=4.66.0
+orjson>=3.10.0
+
+# --- 公司别名表（scripts/build_companies.py 生成「拼音」列） ---
+# 未装则该列留空，resolve 的拼音模糊匹配（Q2）退化；服务仍可正常跑。
+pypinyin>=0.51.0
+
+# --- 流式输出（SSE） ---
+sse-starlette>=2.0.0
+
